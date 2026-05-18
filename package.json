@@ -9,7 +9,8 @@
     "dev": "npm run start",
     "api": "node src/server.js",
     "worker": "node src/worker.js",
-    "db:wait": "node scripts/wait-for-db.js"
+    "db:wait": "node scripts/wait-for-db.js",
+    "test": "node --test"
   },
   "engines": {
     "node": ">=18"

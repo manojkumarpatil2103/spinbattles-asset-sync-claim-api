@@ -86,7 +86,16 @@ async function processClaimMessage(raw) {
   }
 
   const claimId = job.claimId;
-  const jobLog = log.child({ claimId, jobType: job.type });
+  const jobLog = log.child({
+    claimId,
+    requestId: job.requestId,
+    userId: job.userId,
+    sku: job.sku,
+    txHash: job.txHash,
+    jobType: job.type,
+  });
+
+  jobLog.info('Received claim job');
 
   const claimRow = await pool.query(
     `select id, user_id, sku, tx_hash, status
@@ -101,9 +110,11 @@ async function processClaimMessage(raw) {
 
   const claim = claimRow.rows[0];
   if (claim.status === 'confirmed' || claim.status === 'failed') {
+    jobLog.info({ status: claim.status }, 'Skipping terminal claim');
     return;
   }
 
+  let claimForVerification;
   await withTransaction(async (client) => {
     const locked = await client.query(
       `select id, status, tx_hash, sku, user_id
@@ -124,11 +135,46 @@ async function processClaimMessage(raw) {
       [claimId]
     );
 
-    let verification;
-    try {
-      verification = await verifyOnChainTx(c.tx_hash, jobLog);
-    } catch (e) {
-      verification = { ok: false, reason: `rpc_error:${e.message}` };
+    claimForVerification = c;
+  });
+
+  if (!claimForVerification) {
+    jobLog.info('Claim already handled by another delivery');
+    return;
+  }
+
+  const claimLog = jobLog.child({
+    userId: claimForVerification.user_id,
+    sku: claimForVerification.sku,
+    txHash: claimForVerification.tx_hash,
+  });
+
+  claimLog.info({ status: 'processing' }, 'Claim marked processing');
+
+  let verification;
+  try {
+    verification = await verifyOnChainTx(claimForVerification.tx_hash, claimLog);
+  } catch (e) {
+    verification = { ok: false, reason: `rpc_error:${e.message}` };
+  }
+
+  claimLog.info(
+    { verificationMode: verification.mode, ok: verification.ok, reason: verification.reason },
+    'Claim verification finished'
+  );
+
+  await withTransaction(async (client) => {
+    const locked = await client.query(
+      `select id, status, tx_hash, sku, user_id
+       from claim_intents
+       where id = $1
+       for update`,
+      [claimId]
+    );
+    const c = locked.rows[0];
+    if (!c || c.status === 'confirmed' || c.status === 'failed') {
+      claimLog.info({ status: c && c.status }, 'Skipping terminal claim during finalize');
+      return;
     }
 
     if (!verification.ok) {
@@ -140,17 +186,18 @@ async function processClaimMessage(raw) {
          where id = $1`,
         [claimId, verification.reason || 'verification_failed']
       );
+      claimLog.warn(
+        { status: 'failed', reason: verification.reason || 'verification_failed' },
+        'Claim marked failed'
+      );
       return;
     }
 
-    await client.query(
+    const granted = await client.query(
       `insert into inventory_items (user_id, sku, quantity, state, source_tx_hash)
        values ($1, $2, 1, 'confirmed', $3)
-       on conflict (user_id, sku, source_tx_hash)
-       do update set
-         quantity = inventory_items.quantity + 1,
-         state = 'confirmed',
-         updated_at = now()`,
+       on conflict do nothing
+       returning id`,
       [c.user_id, c.sku, c.tx_hash]
     );
 
@@ -160,9 +207,18 @@ async function processClaimMessage(raw) {
        where id = $1`,
       [claimId]
     );
+
+    claimLog.info(
+      {
+        status: 'confirmed',
+        inventoryGranted: granted.rowCount > 0,
+        inventoryItemId: granted.rows[0] && granted.rows[0].id,
+      },
+      'Claim marked confirmed'
+    );
   });
 
-  jobLog.info('Processed claim');
+  claimLog.info('Processed claim');
 }
 
 function startPullWorker() {

@@ -208,7 +208,41 @@ router.post('/users/:userId/claims', async (req, res, next) => {
       return ins.rows[0];
     });
 
-    enqueueJob({ type: 'PROCESS_CLAIM', claimId: result.id });
+    const requestId = req.id || req.headers['x-request-id'];
+    const job = {
+      type: 'PROCESS_CLAIM',
+      claimId: result.id,
+      requestId,
+      userId: result.user_id,
+      sku: result.sku,
+      txHash: result.tx_hash,
+    };
+
+    req.log.info(
+      {
+        requestId,
+        claimId: result.id,
+        userId: result.user_id,
+        sku: result.sku,
+        txHash: result.tx_hash,
+        status: result.status,
+      },
+      'claim intent created'
+    );
+
+    enqueueJob(job);
+
+    req.log.info(
+      {
+        requestId,
+        claimId: result.id,
+        userId: result.user_id,
+        sku: result.sku,
+        txHash: result.tx_hash,
+        jobType: job.type,
+      },
+      'claim job enqueued'
+    );
 
     res.status(202).json({
       claim: result,
