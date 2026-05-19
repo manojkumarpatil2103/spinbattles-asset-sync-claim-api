@@ -42,7 +42,13 @@ CREATE TABLE IF NOT EXISTS claim_intents (
 
 CREATE INDEX IF NOT EXISTS idx_claim_intents_user ON claim_intents (user_id);
 CREATE INDEX IF NOT EXISTS idx_inventory_user ON inventory_items (user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_inventory_source_tx_hash_unique
+  ON inventory_items (source_tx_hash)
+  WHERE source_tx_hash IS NOT NULL;
+  -- source_tx_hash can only create one inventory grant
 
 INSERT INTO users (handle)
 VALUES ('demo_player')
 ON CONFLICT (handle) DO NOTHING;
+-- on conflict do update set quantity = quantity + 1 
+-- (before insert,  user exists without modifying existing data.)
